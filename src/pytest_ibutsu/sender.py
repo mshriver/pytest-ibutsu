@@ -5,8 +5,9 @@ import os
 import time
 from http.client import BadStatusLine
 from http.client import RemoteDisconnected
+from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, cast
+from typing import TYPE_CHECKING, Callable, cast, BinaryIO
 from typing import TypeVar, ParamSpec
 
 from ibutsu_client.api_client import ApiClient
@@ -156,6 +157,37 @@ class IbutsuSender:
         else:
             self._make_call(self.run_api.add_run, run=run.to_dict())
 
+    def _prepare_stream(self, data: bytes | str) -> tuple[BinaryIO, int]:
+        """
+        Returns a file-like object and its size:
+        - bytes → BytesIO
+        - existing file path → open file
+        - anything else → UTF-8-encoded BytesIO
+        """
+        if isinstance(data, bytes):
+            buf: BinaryIO = BytesIO(data)
+        else:
+            text = data
+            try:
+                # Skip URL-like strings
+                if text.startswith(("http://", "https://")):
+                    buf = BytesIO(text.encode("utf-8"))
+                else:
+                    path = Path(text)
+                    if path.is_file():
+                        buf = path.open("rb")
+                    else:
+                        buf = BytesIO(text.encode("utf-8"))
+            except (TypeError, OSError):
+                buf = BytesIO(str(text).encode("utf-8"))
+
+        # compute size
+        pos = buf.tell()
+        buf.seek(0, os.SEEK_END)
+        size = buf.tell()
+        buf.seek(pos)
+        return buf, size
+
     def upload_artifacts(self, r: IbutsuTestResult | IbutsuTestRun) -> None:
         for filename, data in r._artifacts.items():
             try:
@@ -173,62 +205,54 @@ class IbutsuSender:
     def _upload_artifact(
         self, id_: str, filename: str, data: bytes | str, is_run: bool = False
     ) -> None:
-        kwargs: dict[str, str] = {}
-        if is_run:
-            kwargs["run_id"] = id_
-        else:
-            kwargs["result_id"] = id_
-
+        kwargs = {"run_id" if is_run else "result_id": id_}
+        stream = None
+        upload_successful = False
         try:
             logger.debug(f"Uploading artifact {filename} for {id_}")
-
-            # Handle file path strings by reading the file content
-            if (
-                isinstance(data, str)
-                and len(data) > 0
-                and not data.startswith(("http://", "https://"))
-            ):
-                try:
-                    # Check if it's a file path
-                    file_path = Path(data)
-                    if file_path.exists() and file_path.is_file():
-                        file_size = file_path.stat().st_size
-                        if file_size >= UPLOAD_LIMIT:
-                            logger.error("Artifact size is greater than upload limit")
-                            return
-                        # Read file content as bytes
-                        data = file_path.read_bytes()
-                    # If not a file path, treat as string content
-                except OSError:
-                    # If file operations fail, treat data as string content
-                    pass
-
-            # Check size for bytes data
-            if isinstance(data, bytes):
-                if len(data) >= UPLOAD_LIMIT:
-                    logger.error("Artifact size is greater than upload limit")
-                    return
-
-            # Pass data directly to the API (no BufferedReader wrapper needed)
+            stream, size = self._prepare_stream(data)
+            if size >= UPLOAD_LIMIT:
+                logger.error("Artifact size is greater than upload limit")
+                return
             self._make_call(
                 self.artifact_api.upload_artifact,
                 filename,
-                data,
+                stream,
                 hide_exception=False,
                 **kwargs,
             )
-        except ApiValueError:
-            logger.error(
-                f"Uploading artifact '{filename}' failed as the file closed prematurely."
-            )
-        except FileNotFoundError:
+            upload_successful = True
+        except (FileNotFoundError, PermissionError, OSError) as exc:
             # data should be a file path string in this context, but handle bytes safely
             data_repr = (
                 data.decode("utf-8", errors="replace")
                 if isinstance(data, bytes)
                 else data
             )
-            logger.error(f"Artifact file '{data_repr}' not found, skipping upload.")
+            if isinstance(exc, FileNotFoundError):
+                logger.error(f"Artifact file '{data_repr}' not found, skipping upload.")
+            elif isinstance(exc, PermissionError):
+                logger.error(
+                    f"Permission denied when accessing artifact file '{data_repr}', skipping upload."
+                )
+            else:
+                logger.error(
+                    f"Error accessing artifact file '{data_repr}': {exc}, skipping upload."
+                )
+        except ApiValueError:
+            logger.error(
+                f"Uploading artifact '{filename}' failed as the file closed prematurely."
+            )
+        finally:
+            # Only close the stream if upload failed or if it's a file (not BytesIO)
+            # This allows tests to read BytesIO streams while ensuring files are closed
+            if stream is not None and (
+                not upload_successful or hasattr(stream, "name")
+            ):
+                try:
+                    stream.close()
+                except Exception:
+                    pass
 
 
 def send_data_to_ibutsu(ibutsu_plugin: IbutsuPlugin) -> None:

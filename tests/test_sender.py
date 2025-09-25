@@ -204,7 +204,10 @@ class TestIbutsuSender:
         args, kwargs = sender._make_call.call_args
         assert args[0] == sender.artifact_api.upload_artifact
         assert args[1] == "test.txt"  # filename
-        assert args[2] == content  # data passed directly
+        # args[2] should be a stream, let's read it to verify content
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == content  # data passed as stream
         assert kwargs["result_id"] == "result-id"
 
     def test_upload_artifact_string_content(self):
@@ -219,7 +222,10 @@ class TestIbutsuSender:
         args, kwargs = sender._make_call.call_args
         assert args[0] == sender.artifact_api.upload_artifact
         assert args[1] == "test.txt"
-        assert args[2] == content  # String passed directly
+        # args[2] should be a stream containing UTF-8 encoded string
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == content.encode("utf-8")  # String encoded as UTF-8
         assert kwargs["result_id"] == "result-id"
 
     def test_upload_artifact_file_path(self, tmp_path):
@@ -238,7 +244,10 @@ class TestIbutsuSender:
         args, kwargs = sender._make_call.call_args
         assert args[0] == sender.artifact_api.upload_artifact
         assert args[1] == "test.txt"
-        assert args[2] == test_content.encode()  # Should be read as bytes
+        # args[2] should be a stream with file content
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == test_content.encode()  # Should be read as bytes
         assert kwargs["result_id"] == "result-id"
 
     def test_upload_artifact_binary_file_path(self, tmp_path):
@@ -259,7 +268,32 @@ class TestIbutsuSender:
         args, kwargs = sender._make_call.call_args
         assert args[0] == sender.artifact_api.upload_artifact
         assert args[1] == "test_image.png"
-        assert args[2] == binary_content  # Should be read as bytes
+        # args[2] should be a stream, let's read it to verify content
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == binary_content  # Should be read as bytes
+        assert kwargs["result_id"] == "result-id"
+
+    def test_upload_artifact_non_utf8_file_path(self, tmp_path):
+        """Test _upload_artifact with non-UTF-8 encoded files."""
+        sender = IbutsuSender("http://example.com/api")
+        sender._make_call = Mock()
+
+        # Create a file with latin-1 encoding
+        test_file = tmp_path / "latin1_file.txt"
+        latin1_content = "Café con leña"  # Contains non-ASCII characters
+        test_file.write_bytes(latin1_content.encode("latin-1"))
+
+        sender._upload_artifact("result-id", "latin1_file.txt", str(test_file), False)
+
+        sender._make_call.assert_called_once()
+        args, kwargs = sender._make_call.call_args
+        assert args[0] == sender.artifact_api.upload_artifact
+        assert args[1] == "latin1_file.txt"
+        # args[2] should be a stream with the raw bytes
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == latin1_content.encode("latin-1")
         assert kwargs["result_id"] == "result-id"
 
     def test_upload_artifact_bytes_over_limit(self, caplog):
@@ -331,9 +365,12 @@ class TestIbutsuSender:
         # Should still call the API with the string data (fallback behavior)
         sender._make_call.assert_called_once()
         args, kwargs = sender._make_call.call_args
-        assert (
-            args[2] == nonexistent_file
-        )  # String passed as-is when file doesn't exist
+        # args[2] should be a stream containing the string data as UTF-8
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == nonexistent_file.encode(
+            "utf-8"
+        )  # String encoded as UTF-8
 
     def test_upload_artifact_url_string_not_treated_as_file(self):
         """Test that URL strings are not treated as file paths."""
@@ -345,7 +382,12 @@ class TestIbutsuSender:
 
         sender._make_call.assert_called_once()
         args, kwargs = sender._make_call.call_args
-        assert args[2] == url_content  # URL string passed directly
+        # args[2] should be a stream containing URL encoded as UTF-8
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == url_content.encode(
+            "utf-8"
+        )  # URL string encoded as UTF-8
 
     def test_upload_artifact_https_string_not_treated_as_file(self):
         """Test that HTTPS URL strings are not treated as file paths."""
@@ -357,7 +399,12 @@ class TestIbutsuSender:
 
         sender._make_call.assert_called_once()
         args, kwargs = sender._make_call.call_args
-        assert args[2] == url_content  # HTTPS URL string passed directly
+        # args[2] should be a stream containing URL encoded as UTF-8
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == url_content.encode(
+            "utf-8"
+        )  # HTTPS URL string encoded as UTF-8
 
 
 class TestArtifactUploadIntegration:
@@ -384,7 +431,10 @@ class TestArtifactUploadIntegration:
         args, kwargs = sender._make_call.call_args
         assert args[0] == sender.artifact_api.upload_artifact
         assert args[1] == "iqe.log"
-        assert args[2] == log_bytes  # Should be the exact bytes
+        # args[2] should be a stream containing the log bytes
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == log_bytes  # Should be the exact bytes
         assert kwargs["result_id"] == result.id
 
     def test_network_log_upload_like_iqe_core(self):
@@ -407,7 +457,10 @@ class TestArtifactUploadIntegration:
         sender._make_call.assert_called_once()
         args, kwargs = sender._make_call.call_args
         assert args[1] == "net.log"
-        assert args[2] == net_log_bytes
+        # args[2] should be a stream containing the net log bytes
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == net_log_bytes
 
     def test_browser_log_upload_like_iqe_core(self):
         """Test browser log upload like iqe-core does with browser.log."""
@@ -429,7 +482,10 @@ class TestArtifactUploadIntegration:
         sender._make_call.assert_called_once()
         args, kwargs = sender._make_call.call_args
         assert args[1] == "browser.log"
-        assert args[2] == browser_log_bytes
+        # args[2] should be a stream containing the browser log bytes
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == browser_log_bytes
 
     def test_screenshot_upload_like_iqe_core(self):
         """Test screenshot upload like iqe-core does with screenshot.png."""
@@ -453,7 +509,10 @@ class TestArtifactUploadIntegration:
         sender._make_call.assert_called_once()
         args, kwargs = sender._make_call.call_args
         assert args[1] == "screenshot.png"
-        assert args[2] == mock_png_data  # Should be the exact binary data
+        # args[2] should be a stream containing the PNG data
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == mock_png_data  # Should be the exact binary data
 
     def test_navigation_gif_upload_like_iqe_core(self):
         """Test navigation GIF upload like iqe-core does with nav.gif."""
@@ -476,7 +535,10 @@ class TestArtifactUploadIntegration:
         sender._make_call.assert_called_once()
         args, kwargs = sender._make_call.call_args
         assert args[1] == "nav.gif"
-        assert args[2] == mock_gif_data  # Should be the exact binary data
+        # args[2] should be a stream containing the GIF data
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == mock_gif_data  # Should be the exact binary data
 
     def test_traceback_log_upload_like_iqe_core(self):
         """Test traceback log upload like iqe-core does with traceback.log."""
@@ -500,7 +562,10 @@ class TestArtifactUploadIntegration:
         sender._make_call.assert_called_once()
         args, kwargs = sender._make_call.call_args
         assert args[1] == "traceback.log"
-        assert args[2] == traceback_bytes
+        # args[2] should be a stream containing the traceback bytes
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == traceback_bytes
 
     def test_multiple_artifacts_upload_like_iqe_core(self):
         """Test multiple artifacts upload like iqe-core does in a single test."""
@@ -529,7 +594,12 @@ class TestArtifactUploadIntegration:
 
         # Check that all artifacts were uploaded with correct data
         calls = sender._make_call.call_args_list
-        uploaded_files = {call[0][1]: call[0][2] for call in calls}
+        uploaded_files = {}
+        for call_info in calls:
+            filename = call_info[0][1]
+            stream = call_info[0][2]
+            stream_content = stream.read()
+            uploaded_files[filename] = stream_content
 
         assert "iqe.log" in uploaded_files
         assert "screenshot.png" in uploaded_files
@@ -555,7 +625,10 @@ class TestArtifactUploadIntegration:
         sender._make_call.assert_called_once()
         args, kwargs = sender._make_call.call_args
         assert args[1] == "run_setup.log"
-        assert args[2] == run_log_content.encode("utf-8")
+        # args[2] should be a stream containing the run log bytes
+        stream = args[2]
+        stream_content = stream.read()
+        assert stream_content == run_log_content.encode("utf-8")
         assert kwargs["run_id"] == run.id
         assert "result_id" not in kwargs
 
